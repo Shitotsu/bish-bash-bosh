@@ -1,10 +1,10 @@
 #/bin/bash
 
-#List VM Before Prune
-bosh vms -d service-instance_3d677192-b4fb-4402-86ec-37b6fa4b012b | grep worker | awk '{print $1}' > vm-dev-list.txt
-
 #deployment ID
-deployment_id="service-instance_3d677192-b4fb-4402-86ec-37b6fa4b012b"
+deployment_id="*"
+
+#List VM Before Prune
+bosh vms -d $deployment_id | grep worker | awk '{print $1}' > vm-dev-list.txt
 
 # File yang berisi daftar vm-id
 vm_list_file="vm-dev-list.txt"
