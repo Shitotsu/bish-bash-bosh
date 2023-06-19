@@ -1,0 +1,65 @@
+stages: 
+  - build-test
+  - trivy-scan
+  - deploy
+  - test-curl
+
+build-test-job:
+  stage: build-test
+  before_script: 
+    - echo $HARBOR_USER
+    - echo -n $HARBOR_PASS | docker login -u $HARBOR_USER --password-stdin $HARBOR_HOST
+    - docker version
+    - docker info 
+  script:
+    - figlet -f big "Build and Test Docker Image..."
+    - echo "RUN python -m pytest tests/test_rsvpapp.py" | tee -a Dockerfile
+    - cat Dockerfile
+    - docker build -t $HARBOR_REG .
+    - docker push $HARBOR_REG
+
+vuln-scan-job:
+  stage: trivy-scan
+  before_script:
+    - echo $HARBOR_USER
+    - echo -n $HARBOR_PASS | docker login -u $HARBOR_USER --password-stdin $HARBOR_HOST
+    #- figlet -f big "SCANNING VULNERABLE PACKAGE....."
+    #- trivy image --severity critical,high --security-checks vuln lamad-harbor.lab:5000/lambda-registry/yuga-app:v5.0.0
+  script:
+    - figlet -f big "run a script to contain the name of the package that is the vulnerability..."
+    - chmod +x trivy-scan.sh
+    - ./trivy-scan.sh
+    - ls -lah
+    - cat vuln-package1.txt
+    - cat vuln-package2.txt
+    - cat Dockerfile 
+    #- echo "RUN chmod +x ./hard.sh" | tee -a Dockerfile
+    #- echo "RUN ./hard.sh" | tee -a Dockerfile
+   
+  after_script:   
+    - figlet -f big "Build Docker Image..."
+    - docker build -t $HARBOR_REG .
+    - docker push $HARBOR_REG
+    
+test-curl-job:
+  stage: test-curl
+  script:
+    - curl 10.10.51.150:30050
+
+deploy-job:
+  stage: deploy
+  before_script: 
+    - figlet -f big "Login To Harbor Registry..."
+    - echo $HARBOR_USER
+    - echo -n $HARBOR_PASS | docker login -u $HARBOR_USER --password-stdin $HARBOR_HOST
+    - chmod +x image-filter.sh
+  script:
+    - ls
+    - export KUBECONFIG=kubeconfig.yaml
+    - figlet -f big "IMAGE FILTER START..."
+    - ./image-filter.sh
+  after_script:
+    - figlet -f big "Remove Container..."
+    - figlet -f big "Logout Harbor..."
+    - docker logout $HARBOR_HOST
+    - docker image rm $(docker image ls -q)

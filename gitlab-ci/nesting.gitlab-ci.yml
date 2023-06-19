@@ -1,0 +1,276 @@
+image: ${DIND_PIPE}
+
+stages:
+  - install deps
+  - test
+  - create env
+  - build image
+  - deploy
+  - notify
+
+variables:
+  REPO_IMAGE_DEV: ${URL_REGISTRY}/lnswdev-${APP_NAME}/${APP_NAME}
+  REPO_IMAGE_PROD: ${URL_REGISTRY}/lnswprod-${APP_NAME}/${APP_NAME}
+  REPO_IMAGE_DRC: ${URL_REGISTRY_DRC}/lnswdrc-${APP_NAME}/${APP_NAME}
+  REPO_IMAGE_DUAL: ${URL_REGISTRY_DUAL}/lnswdual-${APP_NAME}/${APP_NAME}
+  REPO_IMAGE_SDC: ${URL_REGISTRY_SDC}/lnswprod-${APP_NAME}/${APP_NAME}
+
+install dependencies:
+  stage: install deps
+  cache:
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - node_modules
+    untracked: true
+    policy: pull-push
+  tags:
+    - dc
+  before_script:
+    - node -v
+  script:
+    - npm install
+
+smoke test:
+  stage: test
+  cache:
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - node_modules
+    untracked: true
+    policy: pull
+  tags:
+    - dc
+  script:
+    - touch .env
+    - echo "${ENV_TEST}" >> .env 
+    - npm run test:smoke &
+    - sleep 10
+    - curl -o - -I "localhost:3000" | tac | tac | grep -q "200 OK"
+
+sonarqube-check:
+  stage: test
+  tags: 
+    - dc
+  image: 
+    name: ${SONAR_IMG}
+    entrypoint: [""]
+  variables:
+    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"  # Defines the location of the analysis task cache
+    GIT_DEPTH: "0"  # Tells git to fetch all the branches of the project, required by the analysis task
+  cache:
+    key: "${CI_JOB_NAME}"
+    paths:
+      - .sonar/cache
+  script: 
+    - sonar-scanner
+  allow_failure: true
+  only:
+    - prod
+    - master
+    - main
+
+inject env dev:
+  stage: create env
+  only:
+    - development
+    - dev
+  dependencies: []
+  tags:
+    - dc
+  image: ${TKGI_IMAGE}
+  script:
+    - echo "${ENV_DEV}" > .env
+    # - echo "=== checking credentials value ==="
+    # - value="$( grep -ic "sys_cms\|10.239.9.12" .env || true )"
+    # - if [ "$value" != "0" ] ; then echo "sys_cms or 10.239.9.12 found, please change first" && exit 1; else echo "sys_cms or 10.239.9.12 not found, OK"; fi
+    - echo "=== inject commit id (if any) ==="
+    - sed -i "s|initial-commit|${CI_COMMIT_SHORT_SHA}|g" .env
+    - cat .env | grep CI_COMMIT
+    - echo "=== configure secret for development ==="
+    - tkgi login -a ${TKGI_CLUSTER} -u ${TKGI_USER} -p ${TKGI_PASS} -k
+    - echo ${TKGI_PASS} | tkgi get-credentials ${TKGI_K8S_DEV_SMALL01}
+    - kubectl delete secret -n lnsw-dev ${APP_NAME}-dev-secret --ignore-not-found
+    - kubectl create secret generic -n lnsw-dev ${APP_NAME}-dev-secret --from-env-file=.env
+
+inject env prod:
+  stage: create env
+  only:
+    - master
+    - main
+    - prod
+  dependencies: []
+  tags:
+    - dc
+  image: ${TKGI_IMAGE}
+  script:
+    - echo "${ENV_PROD}" > .env
+    # - echo "=== checking credentials value ==="
+    # - value="$( grep -ic "sys_cms\|10.239.9.12" .env || true )"
+    # - if [ "$value" != "0" ] ; then echo "sys_cms or 10.239.9.12 found, please change first" && exit 1; else echo "sys_cms or 10.239.9.12 not found, OK"; fi
+    - echo "=== inject commit id (if any) ==="
+    - sed -i "s|initial-commit|${CI_COMMIT_SHORT_SHA}|g" .env
+    - cat .env | grep CI_COMMIT
+    - echo "=== configure secret for production ==="
+    - tkgi login -a ${TKGI_CLUSTER} -u ${TKGI_USER} -p ${TKGI_PASS} -k
+    - echo ${TKGI_PASS} | tkgi get-credentials ${TKGI_K8S_PROD_MED01}
+    - kubectl delete secret -n lnsw ${APP_NAME}-prod-secret --ignore-not-found
+    - kubectl create secret generic -n lnsw ${APP_NAME}-prod-secret --from-env-file=.env
+    - echo "=== configure secret for SDC ==="
+    - tkgi login -a ${TKGI_CLUSTER_SDC} -u ${TKGI_USER_SDC} -p ${TKGI_PASS_SDC} -k
+    - echo ${TKGI_PASS_SDC} | tkgi get-credentials ${TKGI_KUBE_SDC_PROD01}
+    - kubectl delete secret -n lnsw ${APP_NAME}-prod-secret --ignore-not-found
+    - kubectl create secret generic -n lnsw ${APP_NAME}-prod-secret --from-env-file=.env
+
+inject env drc:
+  stage: create env
+  only:
+    - master
+    - main
+    - prod
+  dependencies: []
+  tags:
+    - dc
+  image: ${TKGI_IMAGE}
+  script:
+    - echo "=== inject commit id (if any) ==="
+    - echo "${ENV_DRC}" > .env
+    - sed -i "s|initial-commit|${CI_COMMIT_SHORT_SHA}|g" .env
+    - cat .env | grep CI_COMMIT
+    - echo "=== configure secret for prod - drc ==="
+    - tkgi login -a ${TKGI_CLUSTER_DRC} -u ${TKGI_USER} -p ${TKGI_PASS} -k
+    - echo ${TKGI_PASS} | tkgi get-credentials ${TKGI_K8S_DRC_MED01}
+    - kubectl delete secret -n lnsw ${APP_NAME}-drc-secret --ignore-not-found
+    - kubectl create secret generic -n lnsw ${APP_NAME}-drc-secret --from-env-file=.env
+
+build image dev:
+  stage: build image
+  only:
+    - development
+    - dev
+  cache:
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - node_modules
+    untracked: true
+    policy: pull
+  tags:
+    - dc
+  image: ${DOCKER_DIND}
+  script:
+    - ls node_modules | wc -l
+    - docker login -u ${DOCKER_USER} -p ${DOCKER_PASSWORD} ${URL_REGISTRY}
+    - docker build -t ${APP_NAME} .
+    - docker tag ${APP_NAME} ${REPO_IMAGE_DEV}:${CI_COMMIT_SHORT_SHA}
+    - docker push ${REPO_IMAGE_DEV}:${CI_COMMIT_SHORT_SHA}
+
+build image prod:
+  stage: build image
+  only:
+    - prod
+    - master
+    - main
+  cache:
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - node_modules
+    untracked: true
+    policy: pull
+  tags:
+    - dc
+  image: ${DOCKER_DIND}
+  script:
+    - ls node_modules | wc -l
+    - echo "=== build and push to registry DC ==="
+    - docker login -u ${DOCKER_USER} -p ${DOCKER_PASSWORD} ${URL_REGISTRY}
+    - docker build -t ${APP_NAME} .
+    - docker tag ${APP_NAME} ${REPO_IMAGE_PROD}:${CI_COMMIT_SHORT_SHA}
+    - docker push ${REPO_IMAGE_PROD}:${CI_COMMIT_SHORT_SHA}
+    - echo "=== push to registry DRC ==="
+    - docker login -u ${DOCKER_USER} -p ${DOCKER_PASSWORD} ${URL_REGISTRY_DRC}
+    - docker tag ${REPO_IMAGE_PROD}:${CI_COMMIT_SHORT_SHA} ${REPO_IMAGE_DRC}:${CI_COMMIT_SHORT_SHA}
+    - docker push ${REPO_IMAGE_DRC}:${CI_COMMIT_SHORT_SHA}
+    - echo "=== push to registry SDC ==="
+    - docker login -u ${DOCKER_USER_SDC} -p ${DOCKER_PASSWORD_SDC} ${URL_REGISTRY_SDC}
+    - docker tag ${APP_NAME} ${REPO_IMAGE_SDC}:${CI_COMMIT_SHORT_SHA}
+    - docker push ${REPO_IMAGE_SDC}:${CI_COMMIT_SHORT_SHA}
+    - echo "=== delete docker image ==="
+    - docker rmi ${REPO_IMAGE_PROD}:${CI_COMMIT_SHORT_SHA} ${REPO_IMAGE_DRC}:${CI_COMMIT_SHORT_SHA} ${REPO_IMAGE_SDC}:${CI_COMMIT_SHORT_SHA} ${APP_NAME}
+
+deploy to dev:
+  stage: deploy
+  only:
+    - development
+    - dev
+  tags:
+    - dc
+  image: ${TKGI_IMAGE}
+  script:
+    - tkgi login -a ${TKGI_CLUSTER} -u ${TKGI_USER} -p ${TKGI_PASS} -k
+    - echo ${TKGI_PASS} | tkgi get-credentials ${TKGI_K8S_DEV_SMALL01}
+    # - sed -i "s|<<APP_NAME>>|${APP_NAME}|g" ./kubernetes/deployment-dev.yaml
+    # - sed -i "s|<ImageDocker>|${REPO_IMAGE_DEV}:${CI_COMMIT_SHORT_SHA}|g" ./kubernetes/deployment-dev.yaml
+    # - kubectl apply -f ./kubernetes/deployment-dev.yaml
+    - kubectl set image deploy -n lnsw-dev ${APP_NAME}-dev ${APP_NAME}-dev=${REPO_IMAGE_DEV}:${CI_COMMIT_SHORT_SHA} --record
+
+deploy production:
+  stage: deploy
+  only:
+    - prod
+    - master
+    - main
+  tags:
+    - dc
+  image: ${TKGI_IMAGE}
+  script:
+    - echo "=== deploy to cluster DC ==="
+    - tkgi login -a ${TKGI_CLUSTER} -u ${TKGI_USER} -p ${TKGI_PASS} -k
+    - echo ${TKGI_PASS} | tkgi get-credentials ${TKGI_K8S_PROD_MED01}
+    - kubectl set image deploy -n lnsw ${APP_NAME}-prod ${APP_NAME}-prod=${REPO_IMAGE_PROD}:${CI_COMMIT_SHORT_SHA} --record
+    - echo "=== deploy to cluster DRC ==="
+    - tkgi login -a ${TKGI_CLUSTER_DRC} -u ${TKGI_USER} -p ${TKGI_PASS} -k
+    - echo ${TKGI_PASS} | tkgi get-credentials ${TKGI_K8S_DRC_MED01}
+    - kubectl set image deploy -n lnsw ${APP_NAME}-drc ${APP_NAME}-drc=${REPO_IMAGE_DRC}:${CI_COMMIT_SHORT_SHA} --record
+    - echo "=== deploy to smart dc ==="
+    - tkgi login -a ${TKGI_CLUSTER_SDC} -u ${TKGI_USER_SDC} -p ${TKGI_PASS_SDC} -k
+    - echo ${TKGI_PASS_SDC} | tkgi get-credentials ${TKGI_KUBE_SDC_PROD01}
+    - kubectl set image deploy -n lnsw ${APP_NAME}-prod ${APP_NAME}-prod=${REPO_IMAGE_SDC}:${CI_COMMIT_SHORT_SHA} --record
+
+
+success:
+  stage: notify
+  image: dc01w01harbor01.kemenkeu.go.id/alpine/alpine:1.0
+  dependencies: []
+  tags: 
+    - dc
+  script:
+    - 'curl -X POST -H "Content-Type: application/json" -d "{\"chat_id\": \"${TELEGRAM_GROUP}\", \"text\": \"✅ CI/CD Successful \n\nurl : ${CI_PROJECT_URL} \nbranch : ${CI_COMMIT_BRANCH} \ncommit message : ${CI_COMMIT_MESSAGE} \ncommited user: ${GITLAB_USER_NAME} <${GITLAB_USER_EMAIL}> \n\nsee : ${CI_PIPELINE_URL}\"}" https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage '
+  only:
+    - prod
+    - master
+    - main
+    - development
+    - dev
+
+failure:
+  stage: notify
+  image: dc01w01harbor01.kemenkeu.go.id/alpine/alpine:1.0
+  dependencies: []
+  tags: 
+    - dc
+  script:
+    - 'curl -X POST -H "Content-Type: application/json" -d "{\"chat_id\": \"${TELEGRAM_GROUP}\", \"text\": \"❌ CI/CD Failed \n\nurl : ${CI_PROJECT_URL} \nbranch : ${CI_COMMIT_BRANCH} \ncommit message : ${CI_COMMIT_MESSAGE} \ncommited user: ${GITLAB_USER_NAME} <${GITLAB_USER_EMAIL}> \n\nsee : ${CI_PIPELINE_URL}\"}" https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage '
+  when: on_failure
+  only:
+    - prod
+    - master
+    - main
+    - development
+    - dev

@@ -1,0 +1,6 @@
+lambda-app
+lambda-app-db
+my-dep
+nagios-deployment
+nfs-subdir-external-provisioner
+testing

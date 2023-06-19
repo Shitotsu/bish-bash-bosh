@@ -1,0 +1,4 @@
+flask
+pymongo==3.6
+pytest
+mongomock

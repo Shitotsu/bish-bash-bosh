@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: nginx-rs
+  labels:
+    rep: nginx-rs
+  annotations:
+    Desc: Replication Set Testing
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: nginx-rs
+  template:
+    metadata:
+      name: nginx-app
+      labels:
+        app: nginx-rs
+    spec:
+      containers:
+      - name: nginx-rs
+        image: nginx
+        ports:
+        - containerPort: 80
